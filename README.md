@@ -23,9 +23,13 @@ traffic-risk-system/
 │   ├── raw/                        # Original accident data (not tracked)
 │   ├── processed/                  # Pipeline outputs (not tracked)
 │   │   ├── dallas_crashes_annotated.csv
+│   │   ├── crashes_mapped.csv
 │   │   ├── dallas_drive_net.graphml
 │   │   ├── node_mapping.pkl
-│   │   └── processed_graph_data.pt
+│   │   ├── processed_graph_data.pt
+│   │   ├── temporal_signal.pt
+│   │   ├── train_dataset.pt
+│   │   └── test_dataset.pt
 │   └── external/                   # External data sources
 ├── src/
 │   ├── __init__.py
@@ -34,7 +38,8 @@ traffic-risk-system/
 │   ├── crash_mapper.py             # Phase 2: Crash-to-node spatial snapping
 │   ├── drisi_calculator.py         # Phase 2: DR-ISI target variable
 │   ├── pyg_converter.py            # Phase 2: PyTorch Geometric export
-│   └── build_graph_pipeline.py     # Phase 2: End-to-end orchestrator
+│   ├── build_graph_pipeline.py     # Phase 2: End-to-end orchestrator
+│   └── temporal_processor.py       # Phase 3: Temporal sequence generation
 ├── notebooks/                      # Jupyter notebooks for exploration
 ├── environment.yml                 # Conda environment specification
 ├── requirements.txt                # Pip dependencies
@@ -169,6 +174,62 @@ python src/build_graph_pipeline.py
 
 ---
 
+## ⏱️ Phase 3: Spatio-Temporal Sequence Generation
+
+### Running the Pipeline
+
+```bash
+python src/temporal_processor.py
+```
+
+### What it does:
+
+1. **Crash Snapping** (`crash_mapper`): Re-snaps crashes to graph nodes and saves `crashes_mapped.csv` (cached for subsequent runs)
+2. **Temporal Aggregation**: Bins 115k crashes into hourly intervals across 24,697 nodes using scipy sparse matrices (0.0071% density)
+3. **Dynamic Features**: Generates 5 per-node features per timestep — crash_count + cyclical encodings (hour_sin, hour_cos, dow_sin, dow_cos)
+4. **Sliding Windows**: Creates 24-hour look-back windows with 1-hour prediction horizon
+5. **Lazy Loading**: `TemporalCrashDataset` materialises each `(24, N, 5)` window on-the-fly from sparse storage (~2 MB vs ~24 GB dense)
+
+### Pipeline Results
+
+| Metric                | Value                   |
+| --------------------- | ----------------------- |
+| Date range            | 2016-01-01 → 2022-12-31 |
+| Total hours           | 61,368                  |
+| Sparse matrix density | **0.0071%**             |
+| Train samples         | **49,074** (80%)        |
+| Test samples          | **12,269** (20%)        |
+
+### Output Tensor Shapes (per sample)
+
+| Tensor | Shape          | Description                           |
+| ------ | -------------- | ------------------------------------- |
+| `X`    | (24, 24697, 5) | 24h window × nodes × dynamic features |
+| `Y`    | (24697,)       | log(1 + WSS) target per node          |
+
+### Usage in Model Training
+
+```python
+from src.temporal_processor import load_dataset
+
+train_ds, train_meta = load_dataset(split="train")
+test_ds, test_meta = load_dataset(split="test")
+
+X, Y = train_ds[0]  # Lazy: materialised from sparse on-the-fly
+edge_index = train_meta["edge_index"]  # (2, 71392) — static graph
+static_x = train_meta["static_x"]      # (24697, 5) — static node features
+```
+
+### Configuration Options
+
+| Argument        | Default                                       | Description                          |
+| --------------- | --------------------------------------------- | ------------------------------------ |
+| `--crash-csv`   | `data/processed/dallas_crashes_annotated.csv` | Phase 1 output                       |
+| `--data-dir`    | `data/processed`                              | Directory for all outputs            |
+| `--train-ratio` | `0.8`                                         | Chronological train/test split ratio |
+
+---
+
 ## 🔧 Technical Details
 
 ### NLP Distraction Detection (Phase 1)
@@ -196,12 +257,20 @@ The model encodes accident descriptions and computes cosine similarity against t
 - **Bearing entropy**: Shannon entropy of incident-edge bearings in 8 compass bins — measures intersection complexity
 - **DR-ISI**: EPDO-weighted severity index with log normalisation to compress skewed distribution
 
+### Temporal Processing (Phase 3)
+
+- **Sparse-first strategy**: Full dense tensor (61k × 25k × 5) = ~24 GB; sparse representation = ~2 MB
+- **Lazy materialisation**: Windows built on-the-fly in `__getitem__` — peak RAM ~2-3 GB
+- **Cyclical encoding**: `sin/cos` for hour-of-day and day-of-week (avoids one-hot explosion)
+- **Dynamic target**: `Y = log(1 + Σ(EPDO_weight × crashes))` per node per hour
+- **Chronological split**: No shuffle — preserves temporal ordering for valid evaluation
+
 ### Memory Management
 
 - Chunked CSV reading (100k rows/chunk)
-- Early filtering before processing
+- Sparse COO/CSR matrices for temporal aggregation
+- Lazy window materialisation from scipy sparse
 - Explicit garbage collection after each chunk
-- GPU memory monitoring via `torch.cuda.memory_allocated()`
 
 ---
 
@@ -230,7 +299,7 @@ Output columns in `dallas_crashes_annotated.csv`:
 
 - [x] **Phase 1**: Data Engineering & NLP Annotation
 - [x] **Phase 2**: Spatial Graph Construction & DR-ISI Target
-- [ ] **Phase 3**: Temporal Feature Engineering
+- [x] **Phase 3**: Spatio-Temporal Sequence Generation
 - [ ] **Phase 4**: ST-GNN Model Development
 - [ ] **Phase 5**: Training & Evaluation
 - [ ] **Phase 6**: Deployment & Visualization
