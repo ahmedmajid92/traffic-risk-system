@@ -41,9 +41,11 @@ traffic-risk-system/
 │   ├── build_graph_pipeline.py     # Phase 2: End-to-end orchestrator
 │   ├── temporal_processor.py       # Phase 3: Temporal sequence generation
 │   ├── model_architecture.py       # Phase 4: HybridSTGNN model definition
-│   └── train_model.py              # Phase 4: Training loop & evaluation
+│   ├── train_model.py              # Phase 4: Training loop & evaluation
+│   └── evaluate_model.py           # Phase 4: Standalone model evaluation
 ├── models/
-│   └── best_stgnn_model.pth        # Best model checkpoint (not tracked)
+│   ├── best_stgnn_model.pth        # Best model weights (not tracked)
+│   └── checkpoint.pt               # Full training checkpoint for resume (not tracked)
 ├── notebooks/                      # Jupyter notebooks for exploration
 ├── environment.yml                 # Conda environment specification
 ├── requirements.txt                # Pip dependencies
@@ -254,9 +256,19 @@ A 3-stage spatio-temporal model with **157,697 parameters**:
 # Full training (50 epochs, ~15-25 hours with early stopping)
 python src/train_model.py
 
+# Train for only 5 epochs
+python src/train_model.py --epochs 5
+
+# Resume training from where you left off (for another 10 epochs total)
+python src/train_model.py --resume --epochs 10
+
 # Quick smoke test (2 epochs, large stride)
 python src/train_model.py --epochs 2 --stride 2000
 ```
+
+> **💡 Resume workflow**: Train for 5 epochs → stop → resume later for 10 more.
+> The checkpoint (`models/checkpoint.pt`) saves model weights, optimizer, scheduler,
+> epoch counter, and best validation loss — so training continues seamlessly.
 
 ### Training Pipeline
 
@@ -299,6 +311,25 @@ The 24,697-node graph requires careful memory management:
 | `--hidden-dim`  | `128`                         | GCN and LSTM hidden dimension                           |
 | `--pos-weight`  | `10.0`                        | Weight multiplier for non-zero targets                  |
 | `--save-path`   | `models/best_stgnn_model.pth` | Model checkpoint path                                   |
+| `--resume`      | `false`                       | Resume from `models/checkpoint.pt`                      |
+
+### Evaluating a Trained Model
+
+```bash
+# Evaluate on the test set (after training is complete)
+python src/evaluate_model.py
+
+# Full evaluation without stride (slower but exact)
+python src/evaluate_model.py --stride 1
+
+# Evaluate on the training set
+python src/evaluate_model.py --split train
+
+# Use a specific model checkpoint
+python src/evaluate_model.py --model-path models/best_stgnn_model.pth
+```
+
+Reports: Overall RMSE/MAE, Non-zero target RMSE/MAE, Zero-target accuracy, Prediction statistics.
 
 ---
 

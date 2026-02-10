@@ -118,9 +118,56 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.epochs_without_improve = 0
         self.best_state_dict: dict | None = None
+        self.start_epoch = 1  # for resume
+        self.history: dict = {
+            "train_loss": [], "val_loss": [],
+            "rmse": [], "mae": [], "lr": [],
+        }
 
     # -----------------------------------------------------------------
-    def train_one_epoch(self, loader: DataLoader) -> float:
+    def save_checkpoint(self, epoch: int, save_dir: Path) -> None:
+        """
+        Save full training state for resuming later.
+
+        Saves to ``save_dir/checkpoint.pt`` and includes:
+        model, optimizer, scheduler, epoch, best_val_loss, history.
+        """
+        save_dir.mkdir(parents=True, exist_ok=True)
+        ckpt = {
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "best_val_loss": self.best_val_loss,
+            "epochs_without_improve": self.epochs_without_improve,
+            "history": self.history,
+        }
+        if self.best_state_dict is not None:
+            ckpt["best_state_dict"] = self.best_state_dict
+        torch.save(ckpt, save_dir / "checkpoint.pt")
+
+    # -----------------------------------------------------------------
+    def load_checkpoint(self, ckpt_path: Path) -> None:
+        """
+        Restore full training state from a checkpoint.
+        """
+        print(f"\n  ⏩ Resuming from checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        self.best_val_loss = ckpt["best_val_loss"]
+        self.epochs_without_improve = ckpt["epochs_without_improve"]
+        self.start_epoch = ckpt["epoch"] + 1
+        self.history = ckpt.get("history", self.history)
+        self.best_state_dict = ckpt.get("best_state_dict", None)
+
+        print(f"  ✓ Restored epoch {ckpt['epoch']}, best_val_loss={self.best_val_loss:.6f}")
+        print(f"  ✓ Will resume from epoch {self.start_epoch}")
+
+    # -----------------------------------------------------------------
+    def train_one_epoch(self, loader: DataLoader, epoch: int = 0, total_epochs: int = 0) -> float:
         """
         Run one training epoch with gradient accumulation.
 
@@ -129,6 +176,8 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         n_batches = 0
+        total_steps = len(loader)
+        t_epoch = time.perf_counter()
 
         self.optimizer.zero_grad()
 
@@ -148,12 +197,30 @@ class Trainer:
             n_batches += 1
 
             # Optimizer step every accum_steps (or at end of epoch)
-            if (step + 1) % self.accum_steps == 0 or (step + 1) == len(loader):
+            if (step + 1) % self.accum_steps == 0 or (step + 1) == total_steps:
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.clip_norm
                 )
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+
+            # --- Step-level progress (every 50 steps) ---
+            if (step + 1) % 50 == 0 or (step + 1) == total_steps:
+                elapsed = time.perf_counter() - t_epoch
+                avg_time = elapsed / (step + 1)
+                eta = avg_time * (total_steps - step - 1)
+                running_loss = total_loss / n_batches
+                vram = ""
+                if self.device.type == "cuda":
+                    vram = f" | VRAM: {torch.cuda.memory_allocated()/1e9:.1f}GB"
+                print(
+                    f"  [Train] Epoch {epoch}/{total_epochs} "
+                    f"Step {step+1:4d}/{total_steps} "
+                    f"| Loss: {running_loss:.6f} "
+                    f"| {elapsed:.0f}s elapsed "
+                    f"| ETA: {eta:.0f}s{vram}",
+                    flush=True,
+                )
 
         return total_loss / max(n_batches, 1)
 
@@ -167,8 +234,10 @@ class Trainer:
         total_ae = 0.0
         total_count = 0
         n_batches = 0
+        total_steps = len(loader)
+        t_val = time.perf_counter()
 
-        for X_batch, Y_batch in loader:
+        for step, (X_batch, Y_batch) in enumerate(loader):
             X_batch = X_batch.to(self.device)
             Y_batch = Y_batch.to(self.device)
 
@@ -183,6 +252,16 @@ class Trainer:
             total_se += se.sum().item()
             total_ae += ae.sum().item()
             total_count += Y_batch.numel()
+
+            # --- Step-level progress (every 100 steps) ---
+            if (step + 1) % 100 == 0 or (step + 1) == total_steps:
+                elapsed = time.perf_counter() - t_val
+                eta = (elapsed / (step + 1)) * (total_steps - step - 1)
+                print(
+                    f"  [Val]   Step {step+1:4d}/{total_steps} "
+                    f"| {elapsed:.0f}s elapsed | ETA: {eta:.0f}s",
+                    flush=True,
+                )
 
         mean_loss = total_loss / max(n_batches, 1)
         rmse = math.sqrt(total_se / max(total_count, 1))
@@ -201,16 +280,15 @@ class Trainer:
         """
         Full training loop with validation, scheduling, and early stopping.
 
+        Saves a full checkpoint (``models/checkpoint.pt``) after every epoch
+        so training can be resumed with ``--resume``.
+
         Returns
         -------
         history : dict with lists of per-epoch metrics
         """
         save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        history = {
-            "train_loss": [], "val_loss": [],
-            "rmse": [], "mae": [], "lr": [],
-        }
+        ckpt_dir = save_path.parent
 
         eff_batch = train_loader.batch_size * self.accum_steps
 
@@ -220,13 +298,16 @@ class Trainer:
         print(f"  Batch size      : {train_loader.batch_size} × {self.accum_steps} accum = {eff_batch}")
         print(f"  Train steps     : {len(train_loader)}/epoch")
         print(f"  Val steps       : {len(val_loader)}/epoch")
+        print(f"  Epochs          : {self.start_epoch} → {epochs}")
+        if self.start_epoch > 1:
+            print(f"  Resumed from    : epoch {self.start_epoch - 1}")
         print("=" * 80 + "\n")
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(self.start_epoch, epochs + 1):
             t0 = time.perf_counter()
 
             # --- Train ---
-            train_loss = self.train_one_epoch(train_loader)
+            train_loss = self.train_one_epoch(train_loader, epoch, epochs)
 
             # --- Validate ---
             val_metrics = self.validate(val_loader)
@@ -253,11 +334,11 @@ class Trainer:
             elapsed = time.perf_counter() - t0
 
             # --- Log ---
-            history["train_loss"].append(train_loss)
-            history["val_loss"].append(val_loss)
-            history["rmse"].append(val_metrics["rmse"])
-            history["mae"].append(val_metrics["mae"])
-            history["lr"].append(current_lr)
+            self.history["train_loss"].append(train_loss)
+            self.history["val_loss"].append(val_loss)
+            self.history["rmse"].append(val_metrics["rmse"])
+            self.history["mae"].append(val_metrics["mae"])
+            self.history["lr"].append(current_lr)
 
             print(
                 f"Epoch {epoch:3d}/{epochs} │ "
@@ -276,13 +357,17 @@ class Trainer:
                 )
                 break
 
+            # --- Save checkpoint after every epoch (for resume) ---
+            self.save_checkpoint(epoch, ckpt_dir)
+
         # Restore best weights
         if self.best_state_dict is not None:
             self.model.load_state_dict(self.best_state_dict)
             print(f"\n✓ Best model restored (val_loss={self.best_val_loss:.6f})")
             print(f"✓ Checkpoint saved → {save_path}")
+            print(f"✓ Resume checkpoint → {ckpt_dir / 'checkpoint.pt'}")
 
-        return history
+        return self.history
 
 
 # =====================================================================
@@ -420,6 +505,8 @@ def main() -> None:
                         help="Weight for non-zero targets in loss")
     parser.add_argument("--save-path", type=Path,
                         default=Path("models/best_stgnn_model.pth"))
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume training from models/checkpoint.pt")
     args = parser.parse_args()
 
     # --- Device ---
@@ -454,6 +541,13 @@ def main() -> None:
         pos_weight=args.pos_weight,
         accum_steps=args.accum_steps,
     )
+
+    # --- Resume from checkpoint if requested ---
+    ckpt_path = args.save_path.parent / "checkpoint.pt"
+    if args.resume and ckpt_path.exists():
+        trainer.load_checkpoint(ckpt_path)
+    elif args.resume:
+        print(f"\n⚠️  No checkpoint found at {ckpt_path}, starting from scratch.")
 
     history = trainer.fit(
         train_loader=train_loader,
