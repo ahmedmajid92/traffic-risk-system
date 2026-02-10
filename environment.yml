@@ -1,8 +1,11 @@
 # Traffic Risk System - ST-GNN Project
-# Conda Environment for Phase 1: Data Engineering & NLP Annotation
+# Conda Environment for Phase 1 & 2
 
 name: traffic-risk
 channels:
+  - pyg
+  - pytorch
+  - nvidia
   - conda-forge
   - defaults
 
@@ -10,23 +13,36 @@ dependencies:
   # Python version
   - python=3.11
 
-  # Core Data Processing (conda-forge for stability)
+  # Core Data Processing
   - pandas=2.2.0
   - numpy=1.26.4
 
   # Progress Tracking
   - tqdm=4.66.0
 
+  # Geospatial & Graph
+  - osmnx>=2.0.0
+  - geopandas>=1.0.0
+  - pyproj>=3.6.0
+  - shapely>=2.0.0
+  - networkx>=3.2
+  - scipy>=1.12.0
+  - scikit-learn>=1.4.0
+
+  # PyTorch with CUDA 12.1
+  - pytorch::pytorch>=2.2.0
+  - pytorch::pytorch-cuda=12.1
+  - nvidia::cuda-toolkit=12.1
+
+  # PyTorch Geometric
+  - pyg::pyg>=2.5.0
+
   # Pip for remaining dependencies
   - pip
   - pip:
-      # NLP dependencies (PyTorch installed separately via pip with CUDA index)
+      # NLP dependencies
       - sentence-transformers==3.3.1
       - transformers==4.46.0
       - huggingface-hub==0.26.0
       - tokenizers==0.20.1
       - safetensors==0.4.5
-
-# NOTE: After 'conda env create -f environment.yml', run:
-# conda activate traffic-risk
-# pip install torch==2.5.0+cu121 --index-url https://download.pytorch.org/whl/cu121
