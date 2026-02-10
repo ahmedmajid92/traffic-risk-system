@@ -39,7 +39,11 @@ traffic-risk-system/
 │   ├── drisi_calculator.py         # Phase 2: DR-ISI target variable
 │   ├── pyg_converter.py            # Phase 2: PyTorch Geometric export
 │   ├── build_graph_pipeline.py     # Phase 2: End-to-end orchestrator
-│   └── temporal_processor.py       # Phase 3: Temporal sequence generation
+│   ├── temporal_processor.py       # Phase 3: Temporal sequence generation
+│   ├── model_architecture.py       # Phase 4: HybridSTGNN model definition
+│   └── train_model.py              # Phase 4: Training loop & evaluation
+├── models/
+│   └── best_stgnn_model.pth        # Best model checkpoint (not tracked)
 ├── notebooks/                      # Jupyter notebooks for exploration
 ├── environment.yml                 # Conda environment specification
 ├── requirements.txt                # Pip dependencies
@@ -230,6 +234,74 @@ static_x = train_meta["static_x"]      # (24697, 5) — static node features
 
 ---
 
+## 🧠 Phase 4: Model Architecture & Training
+
+### Architecture: HybridSTGNN
+
+A 3-stage spatio-temporal model with **157,697 parameters**:
+
+| Stage           | Component  | Details                               |
+| --------------- | ---------- | ------------------------------------- |
+| Spatial Encoder | 2× GCNConv | (5 → 128 → 128) + ReLU + Dropout(0.1) |
+| Temporal Core   | LSTM       | (128 → 128), 1 layer, batch_first     |
+| Risk Decoder    | MLP        | (128 → 64 → 1) + ReLU                 |
+
+**Data flow**: `(B, 24, N, 5)` → GCN per timestep → `(B, N, 24, 128)` → LSTM per node → `(B, N, 128)` → MLP → `(B, N)` risk scores
+
+### Training the Model
+
+```bash
+# Full training (50 epochs, ~15-25 hours with early stopping)
+python src/train_model.py
+
+# Quick smoke test (2 epochs, large stride)
+python src/train_model.py --epochs 2 --stride 2000
+```
+
+### Training Pipeline
+
+- **Loss**: Weighted MSE — 10× weight on non-zero targets (handles 87% zero-target sparsity)
+- **Optimizer**: Adam (lr=0.001)
+- **Scheduler**: ReduceLROnPlateau (patience=3, factor=0.5)
+- **Early stopping**: patience=5 epochs on validation loss
+- **Gradient clipping**: max_norm=1.0 (prevents LSTM exploding gradients)
+- **Gradient accumulation**: batch_size=2 × 4 accum steps = **effective batch of 8**
+- **Data stride**: Every 6th sample → ~6,900 train steps/epoch
+
+### VRAM Optimisation
+
+The 24,697-node graph requires careful memory management:
+
+| Optimisation | Approach                                                   |
+| ------------ | ---------------------------------------------------------- |
+| GCN          | Processes one sample at a time (avoids B×N node blow-up)   |
+| LSTM         | Chunks nodes in groups of 4,096 (avoids 197k-sequence OOM) |
+| Batch size   | B=2 micro-batch × 4 accumulation = effective B=8           |
+| Peak VRAM    | **~10 GB** (fits 16 GB GPU)                                |
+
+### Data Splits
+
+| Split | Samples                        | Source        |
+| ----- | ------------------------------ | ------------- |
+| Train | ~41,700 (85% of Phase 3 train) | Chronological |
+| Val   | ~7,360 (15% of Phase 3 train)  | Chronological |
+| Test  | ~12,270 (Phase 3 test)         | Chronological |
+
+### Configuration Options
+
+| Argument        | Default                       | Description                                             |
+| --------------- | ----------------------------- | ------------------------------------------------------- |
+| `--batch-size`  | `2`                           | Micro-batch size per GPU step                           |
+| `--accum-steps` | `4`                           | Gradient accumulation (effective batch = batch × accum) |
+| `--stride`      | `6`                           | Sample every N-th window                                |
+| `--epochs`      | `50`                          | Maximum training epochs                                 |
+| `--lr`          | `0.001`                       | Learning rate                                           |
+| `--hidden-dim`  | `128`                         | GCN and LSTM hidden dimension                           |
+| `--pos-weight`  | `10.0`                        | Weight multiplier for non-zero targets                  |
+| `--save-path`   | `models/best_stgnn_model.pth` | Model checkpoint path                                   |
+
+---
+
 ## 🔧 Technical Details
 
 ### NLP Distraction Detection (Phase 1)
@@ -265,11 +337,21 @@ The model encodes accident descriptions and computes cosine similarity against t
 - **Dynamic target**: `Y = log(1 + Σ(EPDO_weight × crashes))` per node per hour
 - **Chronological split**: No shuffle — preserves temporal ordering for valid evaluation
 
+### Model Architecture (Phase 4)
+
+- **Per-sample GCN**: Processes one sample at a time through 2-layer GCNConv to avoid B×N VRAM blow-up
+- **Chunked LSTM**: Processes nodes in groups of 4,096 to prevent 197k-sequence OOM
+- **Gradient accumulation**: B=2 × 4 steps = effective batch of 8 within 10 GB VRAM
+- **Weighted MSE**: 10× weight on non-zero targets handles extreme sparsity (87% zero risk)
+- **Shape-annotated code**: Every tensor reshape has a `# → (shape)` comment for debugging
+
 ### Memory Management
 
 - Chunked CSV reading (100k rows/chunk)
 - Sparse COO/CSR matrices for temporal aggregation
 - Lazy window materialisation from scipy sparse
+- Per-sample GCN + chunked LSTM for GPU memory efficiency
+- Gradient accumulation for larger effective batch sizes
 - Explicit garbage collection after each chunk
 
 ---
@@ -300,8 +382,8 @@ Output columns in `dallas_crashes_annotated.csv`:
 - [x] **Phase 1**: Data Engineering & NLP Annotation
 - [x] **Phase 2**: Spatial Graph Construction & DR-ISI Target
 - [x] **Phase 3**: Spatio-Temporal Sequence Generation
-- [ ] **Phase 4**: ST-GNN Model Development
-- [ ] **Phase 5**: Training & Evaluation
+- [x] **Phase 4**: HybridSTGNN Model Architecture & Training
+- [ ] **Phase 5**: Full Training & Evaluation
 - [ ] **Phase 6**: Deployment & Visualization
 
 ---
