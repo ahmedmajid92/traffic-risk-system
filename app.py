@@ -280,6 +280,56 @@ def load_node_positions() -> dict[int, tuple[float, float]] | None:
         return None
 
 
+@st.cache_resource(show_spinner=False)
+def load_all_node_risks() -> list[dict] | None:
+    """
+    Load every node's static DR-ISI score and WGS84 position from
+    processed_graph_data.pt.
+
+    Returns
+    -------
+    list[dict] or None
+        Each dict contains node_idx, dr_isi, lat, lon.
+        Only non-zero DR-ISI nodes are included (~3,184 of 24,697).
+        Sorted by dr_isi descending so slice [:N] gives the top-N.
+        Returns None if the data file is not found or cannot be read.
+    """
+    if not GRAPH_DATA_PATH.exists():
+        return None
+
+    try:
+        import torch
+        data = torch.load(GRAPH_DATA_PATH, map_location="cpu", weights_only=False)
+
+        if not hasattr(data, "pos") or data.pos is None:
+            return None
+        if not hasattr(data, "y") or data.y is None:
+            return None
+
+        pos_np = data.pos.numpy()   # (N, 2) — UTM easting/northing
+        y_np   = data.y.numpy()     # (N,)   — DR-ISI scores
+
+        nodes = []
+        for idx in range(pos_np.shape[0]):
+            dr_isi = float(y_np[idx])
+            if dr_isi <= 0.0:       # skip zero-risk nodes
+                continue
+            easting, northing = pos_np[idx]
+            lat, lon = utm_to_latlon(easting, northing)
+            nodes.append({
+                "node_idx": int(idx),
+                "dr_isi":   dr_isi,
+                "lat":      lat,
+                "lon":      lon,
+            })
+
+        nodes.sort(key=lambda n: n["dr_isi"], reverse=True)
+        return nodes
+
+    except Exception:
+        return None
+
+
 # =====================================================================
 # Visualization Builders
 # =====================================================================
@@ -290,13 +340,15 @@ def build_risk_map(
     all_nodes: list[dict],
     subgraph_data: dict | None,
     node_positions: dict[int, tuple[float, float]] | None,
+    extended_nodes: list[dict] | None = None,
 ) -> pdk.Deck:
     """
     Construct the PyDeck geospatial risk map for Dallas, TX.
 
     Layers:
         1. ScatterplotLayer — Red dot for selected intersection,
-           orange dots for other Top-5 nodes.
+           orange dots for other XAI top-K nodes, small yellow dots
+           for any additional high-risk nodes in extended_nodes.
         2. ArcLayer — Edges from GNNExplainer subgraph, where arc
            colour intensity is proportional to edge weight.
 
@@ -305,11 +357,14 @@ def build_risk_map(
     selected_node : dict
         The currently selected node (from summary.json).
     all_nodes : list[dict]
-        All Top-5 nodes.
+        All XAI top-K nodes (from summary.json).
     subgraph_data : dict or None
         GNNExplainer output for the selected node.
     node_positions : dict or None
         Node index → (lat, lon) lookup table.
+    extended_nodes : list[dict] or None
+        Additional high-risk nodes beyond the XAI top-K, each with
+        keys node_idx, dr_isi, lat, lon (already in WGS84).
 
     Returns
     -------
@@ -321,8 +376,25 @@ def build_risk_map(
         selected_node["longitude"], selected_node["latitude"]
     )
 
-    # --- Build scatter data for all Top-5 nodes ---
+    # --- Build scatter data ---
+    # Extended (background) nodes first so XAI nodes render on top
     scatter_data = []
+
+    xai_node_idxs = {n["node_idx"] for n in all_nodes}
+
+    if extended_nodes:
+        for node in extended_nodes:
+            if node["node_idx"] not in xai_node_idxs:
+                scatter_data.append({
+                    "lat":       node["lat"],
+                    "lon":       node["lon"],
+                    "node_idx":  node["node_idx"],
+                    "mean_risk": node["dr_isi"],
+                    "color":     [255, 220, 0, 100],  # semi-transparent yellow
+                    "radius":    40,
+                })
+
+    # XAI top-K nodes rendered on top of extended nodes
     for node in all_nodes:
         lat, lon = utm_to_latlon(node["longitude"], node["latitude"])
         is_selected = node["node_idx"] == selected_node["node_idx"]
@@ -405,7 +477,7 @@ def build_risk_map(
     return pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        map_style="mapbox://styles/mapbox/dark-v11",
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
         tooltip={
             "html": "<b>Node {node_idx}</b><br/>Mean Risk: {mean_risk:.4f}",
             "style": {"color": "white"},
@@ -718,6 +790,22 @@ def main() -> None:
             )
         )
 
+        st.markdown("---")
+        st.markdown("### 🗺️ Map Display")
+        n_show = st.slider(
+            "High-risk intersections on map",
+            min_value=len(top_nodes),
+            max_value=500,
+            value=max(len(top_nodes), 20),
+            step=10,
+            help=(
+                "Slide to control how many of the highest DR-ISI "
+                "intersections are shown on the map. "
+                "XAI-highlighted nodes (orange/red) are always visible; "
+                "additional nodes appear as small yellow dots."
+            ),
+        )
+
         # Attribution information
         st.markdown("---")
         st.caption(
@@ -741,8 +829,10 @@ def main() -> None:
 
     st.markdown("## 🗺️ Section A: Geospatial Risk Map")
     st.markdown(
-        "The map shows the **selected intersection** (🔴 red) and "
-        "**other high-risk nodes** (🟠 orange). "
+        "The map shows the **selected intersection** (🔴 red), "
+        "**other XAI-highlighted nodes** (🟠 orange), and "
+        "**additional high-risk intersections** (🟡 yellow) up to the "
+        "count set by the sidebar slider. "
         "Arc lines represent the GNNExplainer influence graph — "
         "road segments the model considers important."
     )
@@ -761,10 +851,15 @@ def main() -> None:
             "Subgraph edges cannot be plotted."
         )
 
+    # Load all node risks and compute the extended node list for the map
+    all_node_risks = load_all_node_risks()
+    extended_nodes = all_node_risks[:n_show] if all_node_risks is not None else None
+
     # Build and render the map
     try:
         deck = build_risk_map(
-            selected_node, top_nodes, subgraph_data, node_positions
+            selected_node, top_nodes, subgraph_data, node_positions,
+            extended_nodes=extended_nodes,
         )
         st.pydeck_chart(deck, use_container_width=True)
     except Exception as e:
