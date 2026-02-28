@@ -23,3 +23,9 @@ captum>=0.7.0
 
 # Visualization
 matplotlib>=3.7.0
+
+# Dashboard (Phase 6)
+streamlit>=1.30.0
+pydeck>=0.8.0
+plotly>=5.18.0
+pyproj>=3.6.0

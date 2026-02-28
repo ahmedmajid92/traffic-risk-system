@@ -51,7 +51,7 @@ def _extract_khop_subgraph(
     """
     from torch_geometric.utils import k_hop_subgraph
 
-    sub_nodes, sub_edge_index, _, _ = k_hop_subgraph(
+    sub_nodes, sub_edge_index, mapping, _ = k_hop_subgraph(
         node_idx=target_node_idx,
         num_hops=num_hops,
         edge_index=edge_index,
@@ -59,7 +59,8 @@ def _extract_khop_subgraph(
         num_nodes=num_nodes,
     )
 
-    target_local_idx = (sub_nodes == target_node_idx).nonzero(as_tuple=True)[0].item()
+    # mapping contains the local index of the queried node(s)
+    target_local_idx = mapping.item()
 
     return sub_nodes, sub_edge_index, target_local_idx
 
@@ -87,7 +88,8 @@ class _SubgraphWrapper(torch.nn.Module):
         B = x_flat.shape[0]
         x_4d = x_flat.reshape(B, self.W, self.N_sub, self.F)
         pred = self.model(x_4d, self.sub_edge_index)   # → (B, N_sub)
-        return pred[:, self.target_local_idx]           # → (B,)
+        out = pred[:, self.target_local_idx]            # → (B,)
+        return out.unsqueeze(-1)                        # → (B, 1) for SHAP
 
 
 def explain_features_shap(
@@ -248,7 +250,7 @@ def explain_structure_gnnexplainer(
     )
 
     logger.info("  Running GNNExplainer for node %d...", target_node_idx)
-    explanation = explainer(x_last, ei, target=torch.tensor(target_node_idx))
+    explanation = explainer(x_last, ei, index=target_node_idx)
 
     edge_mask = explanation.edge_mask.detach().cpu().numpy()  # → (E,)
 

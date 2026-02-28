@@ -2,7 +2,7 @@
 Pipeline Showcase — Gradio UI
 ===============================
 
-Interactive dashboard showing inputs/outputs of all 4 project phases.
+Interactive dashboard showing inputs/outputs of all 5 project phases.
 
 Usage:
     python showcase.py
@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 
 import gradio as gr
+import json
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,6 +23,8 @@ import matplotlib.pyplot as plt
 DATA_DIR = Path("data/processed")
 RAW_DATA_PATH = Path("data/raw/US_Accidents_March23.csv")
 MODEL_DIR = Path("models")
+XAI_DIR = DATA_DIR / "xai_artifacts"
+FIG_DIR = Path("reports/figures")
 
 sys.path.insert(0, "src")
 
@@ -265,6 +269,207 @@ def build_phase4() -> str:
 
 
 # =====================================================================
+# Phase 5
+# =====================================================================
+
+def build_phase5_md() -> str:
+    md = "## Phase 5: Explainability & Insights\n\n"
+    md += "**Files:** `src/xai/adapters.py`, `src/xai/explainers.py`, `src/generate_insights.py`, `src/visualization/static_plots.py`\n\n"
+    md += "**XAI Methods:** SHAP (GradientExplainer), GNNExplainer, Captum (IntegratedGradients)\n\n"
+
+    # --- Summary: top risk nodes ---
+    summary_path = XAI_DIR / "summary.json"
+    if not summary_path.exists():
+        return md + "> ⚠️ XAI artifacts not found. Run `python src/generate_insights.py` first.\n"
+
+    with open(summary_path) as f:
+        summary = json.load(f)
+
+    top_nodes = summary["top_risk_nodes"]
+    md += "### Top-5 High-Risk Intersections\n\n"
+    md += "| Rank | Node ID | Mean Risk | Max Risk |\n"
+    md += "|------|---------|-----------|----------|\n"
+    for i, node in enumerate(top_nodes):
+        md += f"| {i+1} | {node['node_idx']} | {node['mean_risk']:.4f} | {node['max_risk']:.4f} |\n"
+
+    # --- SHAP global importance ---
+    shap_path = XAI_DIR / "global_feature_importance.json"
+    if shap_path.exists():
+        with open(shap_path) as f:
+            shap_data = json.load(f)
+        gi = shap_data["global_importance"]
+        md += "\n### SHAP Global Feature Importance\n\n"
+        md += "| Feature | Mean |SHAP| |\n|---------|------------|\n"
+        for name, val in sorted(gi.items(), key=lambda x: -x[1]):
+            bar_len = int(val / max(gi.values()) * 20)
+            bar = "█" * bar_len
+            md += f"| {name} | {val:.6f} {bar} |\n"
+        md += f"\n> **Insight:** `crash_count` dominates — the model relies primarily on historical crash frequency.\n"
+
+    # --- Temporal profiles ---
+    md += "\n### Temporal Attribution (Captum IntegratedGradients)\n\n"
+    md += "Shows which of the 24 hourly timesteps contribute most to each node's prediction.\n\n"
+    for node in top_nodes[:3]:
+        nid = node["node_idx"]
+        tp_path = XAI_DIR / f"temporal_profile_{nid}.json"
+        if tp_path.exists():
+            with open(tp_path) as f:
+                tp = json.load(f)
+            peak = tp["peak_hour_offset"]
+            md += f"- **Node {nid}**: Peak at hour offset **{peak}** "
+            if peak >= 22:
+                md += "(most recent hours dominate)\n"
+            else:
+                md += f"(hour {peak} of 24 is most important)\n"
+
+    # --- GNNExplainer ---
+    md += "\n### GNNExplainer — Spatial Structure\n\n"
+    md += "Identifies which road segments (edges) are most influential for each node's prediction.\n\n"
+    for node in top_nodes[:3]:
+        nid = node["node_idx"]
+        sg_path = XAI_DIR / f"subgraph_{nid}.json"
+        if sg_path.exists():
+            with open(sg_path) as f:
+                sg = json.load(f)
+            n_sub = len(sg["subgraph_nodes"])
+            n_edges = len(sg["top_k_edges"])
+            top_weight = sg["top_k_edges"][0]["weight"] if sg["top_k_edges"] else 0
+            md += f"- **Node {nid}**: {n_sub} connected nodes, top edge weight = {top_weight:.4f}\n"
+
+    # --- Output files ---
+    md += "\n### Generated Artifacts\n\n"
+    md += "| File | Size |\n|------|------|\n"
+    if XAI_DIR.exists():
+        for f in sorted(XAI_DIR.glob("*.json")):
+            md += f"| `{f.name}` | {file_size_str(f)} |\n"
+    if FIG_DIR.exists():
+        for f in sorted(FIG_DIR.glob("*.png")):
+            md += f"| `{f.name}` | {file_size_str(f)} |\n"
+
+    md += "\n### Commands\n\n"
+    md += "```bash\n"
+    md += "# Generate all insights (100 samples, GPU, ~10 min)\n"
+    md += "python src/generate_insights.py\n\n"
+    md += "# Skip SHAP (faster, ~2 min)\n"
+    md += "python src/generate_insights.py --skip-shap\n\n"
+    md += "# More samples for higher confidence\n"
+    md += "python src/generate_insights.py --n-samples 500 --stride 1\n\n"
+    md += "# Regenerate plots only\n"
+    md += "python src/visualization/static_plots.py\n"
+    md += "```\n"
+
+    return md
+
+
+def build_phase5_plots() -> list[plt.Figure]:
+    """Load SHAP bar chart and temporal plots as matplotlib figures."""
+    figs = []
+
+    # SHAP summary
+    shap_path = XAI_DIR / "global_feature_importance.json"
+    if shap_path.exists():
+        with open(shap_path) as f:
+            data = json.load(f)
+        imp = data["global_importance"]
+        features = list(imp.keys())
+        values = list(imp.values())
+        sorted_idx = np.argsort(values)
+        features = [features[i] for i in sorted_idx]
+        values = [values[i] for i in sorted_idx]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(features)))
+        ax.barh(features, values, color=colors)
+        ax.set_xlabel("Mean |SHAP Value|")
+        ax.set_title("Global Feature Importance (SHAP)")
+        ax.grid(axis="x", alpha=0.3)
+        plt.tight_layout()
+        figs.append(("SHAP Feature Importance", fig))
+
+    # Temporal profiles
+    summary_path = XAI_DIR / "summary.json"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            nodes = json.load(f)["top_risk_nodes"]
+        for node in nodes[:3]:
+            nid = node["node_idx"]
+            tp_path = XAI_DIR / f"temporal_profile_{nid}.json"
+            if tp_path.exists():
+                with open(tp_path) as f:
+                    tp = json.load(f)
+                norm = np.array(tp["temporal_importance_normalized"])
+                hours = np.arange(len(norm))
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.bar(hours, norm, color="steelblue", alpha=0.8)
+                ax.axvline(tp["peak_hour_offset"], color="red",
+                           linestyle="--", alpha=0.7,
+                           label=f"Peak: t-{tp['peak_hour_offset']}")
+                ax.set_xlabel("Hour Offset (0 = oldest, 23 = most recent)")
+                ax.set_ylabel("Normalized Importance")
+                ax.set_title(f"Temporal Attribution — Node {nid}")
+                ax.legend()
+                ax.grid(axis="y", alpha=0.3)
+                plt.tight_layout()
+                figs.append((f"Temporal — Node {nid}", fig))
+
+    return figs
+
+
+# =====================================================================
+# Phase 6
+# =====================================================================
+
+def build_phase6() -> str:
+    md = "## Phase 6: Interactive Glass-Box Dashboard\n\n"
+    md += "**File:** `app.py`\n\n"
+    md += "**Framework:** Streamlit + PyDeck + Plotly\n\n"
+
+    md += "### Dashboard Layout\n\n"
+    md += "```mermaid\ngraph TD\n"
+    md += "    A(\"Sidebar\") --> B(\"Node Selector<br/>Top-5 from summary.json\")\n"
+    md += "    B --> C(\"Node Stats<br/>Mean/Max Risk + Coordinates\")\n"
+    md += "    D(\"Section A\") --> E(\"PyDeck Map<br/>ScatterplotLayer + ArcLayer\")\n"
+    md += "    F(\"Section B\") --> G(\"Tab 1: Local SHAP\")\n"
+    md += "    F --> H(\"Tab 2: Temporal Captum\")\n"
+    md += "    F --> I(\"Tab 3: Global SHAP\")\n"
+    md += "```\n\n"
+
+    md += "### Technology Stack\n\n"
+    md += "| Component | Technology | Purpose |\n"
+    md += "|-----------|-----------|---------|\n"
+    md += "| Web Framework | Streamlit | Reactive dashboard UI |\n"
+    md += "| Geospatial Map | PyDeck (Deck.gl) | 3D map with scatter + arc layers |\n"
+    md += "| Charts | Plotly | Interactive SHAP & temporal charts |\n"
+    md += "| CRS Conversion | pyproj | UTM Zone 14N → WGS84 for map pins |\n"
+
+    md += "\n### Coordinate Conversion\n\n"
+    md += "All node positions from Phase 2 are in **UTM Zone 14N (EPSG:32614)** — metric coordinates.\n"
+    md += "PyDeck requires **WGS84 (EPSG:4326)** — geographic degrees. "
+    md += "The dashboard converts at load time using `pyproj.Transformer`.\n\n"
+
+    md += "### Input Artifacts\n\n"
+    md += "| Artifact | XAI Source | Dashboard Section |\n"
+    md += "|----------|-----------|-------------------|\n"
+    md += "| `summary.json` | Model inference | Sidebar + Map |\n"
+    md += "| `local_shap_{id}.json` | SHAP | Tab 1: Feature Drivers |\n"
+    md += "| `temporal_profile_{id}.json` | Captum IG | Tab 2: Temporal |\n"
+    md += "| `global_feature_importance.json` | SHAP | Tab 3: Global Insights |\n"
+    md += "| `subgraph_{id}.json` | GNNExplainer | Map ArcLayer |\n"
+
+    md += "\n### Commands\n\n"
+    md += "```bash\n"
+    md += "# Launch the interactive dashboard\n"
+    md += "streamlit run app.py\n\n"
+    md += "# Launch on a custom port\n"
+    md += "streamlit run app.py --server.port 8502\n\n"
+    md += "# Install Phase 6 dependencies\n"
+    md += "pip install streamlit pydeck plotly pyproj\n"
+    md += "```\n"
+
+    return md
+
+
+# =====================================================================
 # Gradio App
 # =====================================================================
 
@@ -315,6 +520,17 @@ def create_app() -> gr.Blocks:
             with gr.Tab("🧠 Phase 4 — Model", elem_classes=["phase-tab"]):
                 gr.Markdown(build_phase4())
 
+            # ── Phase 5 ──
+            phase5_plots = build_phase5_plots()
+            with gr.Tab("🔍 Phase 5 — XAI Insights", elem_classes=["phase-tab"]):
+                gr.Markdown(build_phase5_md())
+                for label, fig in phase5_plots:
+                    gr.Plot(fig, label=label)
+
+            # ── Phase 6 ──
+            with gr.Tab("🖥️ Phase 6 — Dashboard", elem_classes=["phase-tab"]):
+                gr.Markdown(build_phase6())
+
             # ── Overview ──
             with gr.Tab("📋 Overview", elem_classes=["phase-tab"]):
                 md = "## Project Overview\n\n"
@@ -324,6 +540,8 @@ def create_app() -> gr.Blocks:
                 md += "| 2 | Graph Construction | 24,697-node road graph | `build_graph_pipeline.py` |\n"
                 md += "| 3 | Temporal Sequences | 49k sliding windows | `temporal_processor.py` |\n"
                 md += "| 4 | Model & Training | HybridSTGNN (157k params) | `model_architecture.py`, `train_model.py` |\n"
+                md += "| 5 | Explainability & Insights | SHAP, GNNExplainer, Captum | `generate_insights.py` |\n"
+                md += "| 6 | Interactive Dashboard | Streamlit + PyDeck + Plotly | `app.py` |\n"
                 md += "\n### Data Flow\n\n"
                 md += "```\n"
                 md += "US_Accidents_March23.csv (3 GB)\n"
@@ -339,6 +557,12 @@ def create_app() -> gr.Blocks:
                 md += "    │  Phase 4: GCN + LSTM + MLP\n"
                 md += "    ▼\n"
                 md += "best_stgnn_model.pth (157,697 parameters → per-node risk scores)\n"
+                md += "    │  Phase 5: SHAP + GNNExplainer + Captum\n"
+                md += "    ▼\n"
+                md += "xai_artifacts/ (feature importance, subgraphs, temporal profiles)\n"
+                md += "    │  Phase 6: Streamlit + PyDeck + Plotly\n"
+                md += "    ▼\n"
+                md += "app.py → Interactive Glass-Box Dashboard (localhost:8501)\n"
                 md += "```\n"
                 gr.Markdown(md)
 

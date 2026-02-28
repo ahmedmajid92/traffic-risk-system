@@ -42,10 +42,19 @@ traffic-risk-system/
 │   ├── temporal_processor.py       # Phase 3: Temporal sequence generation
 │   ├── model_architecture.py       # Phase 4: HybridSTGNN model definition
 │   ├── train_model.py              # Phase 4: Training loop & evaluation
-│   └── evaluate_model.py           # Phase 4: Standalone model evaluation
+│   ├── evaluate_model.py           # Phase 4: Standalone model evaluation
+│   ├── generate_insights.py        # Phase 5: XAI pipeline orchestrator
+│   ├── xai/
+│   │   ├── adapters.py             # Phase 5: Model wrappers for SHAP/Captum/GNNExplainer
+│   │   └── explainers.py           # Phase 5: SHAP, GNNExplainer, Captum integrations
+│   └── visualization/
+│       └── static_plots.py         # Phase 5: SHAP & temporal attribution charts
+├── app.py                          # Phase 6: Streamlit interactive dashboard
 ├── models/
 │   ├── best_stgnn_model.pth        # Best model weights (not tracked)
 │   └── checkpoint.pt               # Full training checkpoint for resume (not tracked)
+├── data/processed/xai_artifacts/   # XAI output JSONs (not tracked)
+├── reports/figures/                # Generated PNG plots (not tracked)
 ├── notebooks/                      # Jupyter notebooks for exploration
 ├── environment.yml                 # Conda environment specification
 ├── requirements.txt                # Pip dependencies
@@ -333,6 +342,163 @@ Reports: Overall RMSE/MAE, Non-zero target RMSE/MAE, Zero-target accuracy, Predi
 
 ---
 
+## 🔍 Phase 5: Explainability & Insights
+
+Interprets the trained HybridSTGNN using three complementary XAI techniques:
+
+| Method                           | What It Explains                                    | Tool              |
+| -------------------------------- | --------------------------------------------------- | ----------------- |
+| **SHAP** (GradientExplainer)     | Which input features drive predictions              | `shap`            |
+| **GNNExplainer**                 | Which road segments (edges) matter for each node    | `torch_geometric` |
+| **Captum** (IntegratedGradients) | Which of the 24 hourly timesteps are most important | `captum`          |
+
+### Pipeline Workflow
+
+```
+1. Load model + test data (500 samples, stride=1)
+2. Run inference → identify Top-5 High-Risk Intersections
+3. SHAP Global Feature Importance → global_feature_importance.json
+4. For each Top-5 node:
+   a. GNNExplainer  → subgraph_{node_id}.json
+   b. Captum IG     → temporal_profile_{node_id}.json
+   c. Local SHAP    → local_shap_{node_id}.json
+5. Generate summary.json + static plots (PNG)
+```
+
+### Sampling Strategy
+
+The full test set has ~12,270 windows (stride=1). We ran with **500 samples** for high statistical confidence while keeping runtime manageable (~15 min on GPU):
+
+| Explainer        | Samples Used | Notes                                                                       |
+| ---------------- | ------------ | --------------------------------------------------------------------------- |
+| **Top-K nodes**  | 500          | Robust identification of high-risk nodes across many time windows           |
+| **SHAP**         | 10           | Feature ranking (crash_count >> time features) is stable with small samples |
+| **GNNExplainer** | 1 per node   | Explains spatial structure for one input — more samples don't change it     |
+| **Captum**       | 1 per node   | Explains temporal attribution for one input — same reason                   |
+
+You can adjust the sample count as needed:
+
+```bash
+# Quick run (100 samples, ~10 min)
+python src/generate_insights.py
+
+# Full confidence (500 samples, ~15 min)
+python src/generate_insights.py --n-samples 500 --stride 1
+```
+
+### Subgraph Approach for SHAP
+
+SHAP on the full 24k-node graph is infeasible — each forward pass uses ~10 GB VRAM, and SHAP needs hundreds of simultaneous passes (causes OOM on both GPU and CPU). Instead, we:
+
+1. **Extract a 2-hop subgraph** around the target node (~100-300 nodes)
+2. **Run SHAP on the mini-graph** — fits easily in GPU memory
+3. Feature importance is computed locally but reflects the model's learned patterns
+
+### Commands
+
+```bash
+# Generate all insights (100 samples, GPU, ~10 min)
+python src/generate_insights.py
+
+# Skip SHAP (faster, ~2 min, still runs GNNExplainer + Captum)
+python src/generate_insights.py --skip-shap
+
+# Custom configuration
+python src/generate_insights.py --n-samples 50 --top-k 3
+
+# More samples for higher confidence
+python src/generate_insights.py --n-samples 500 --stride 1
+
+# Regenerate plots from existing JSON artifacts
+python src/visualization/static_plots.py
+```
+
+### Output Artifacts
+
+All saved to `data/processed/xai_artifacts/`:
+
+| File                              | Content                                           |
+| --------------------------------- | ------------------------------------------------- |
+| `summary.json`                    | Top-5 risk nodes with coordinates and risk scores |
+| `global_feature_importance.json`  | SHAP mean \|value\| per feature                   |
+| `subgraph_{node_id}.json`         | GNNExplainer top-20 edges, subgraph nodes         |
+| `temporal_profile_{node_id}.json` | Captum 24-hour attribution weights                |
+| `local_shap_{node_id}.json`       | Per-node SHAP values                              |
+
+Plots saved to `reports/figures/`:
+
+| File                                | Content                                    |
+| ----------------------------------- | ------------------------------------------ |
+| `shap_summary.png`                  | Horizontal bar chart of feature importance |
+| `temporal_importance_{node_id}.png` | Temporal attribution line/bar charts       |
+
+### Configuration Options
+
+| Argument       | Default                        | Description                                  |
+| -------------- | ------------------------------ | -------------------------------------------- |
+| `--model-path` | `models/best_stgnn_model.pth`  | Path to trained model                        |
+| `--data-dir`   | `data/processed`               | Data directory                               |
+| `--output-dir` | `data/processed/xai_artifacts` | Output directory for JSON artifacts          |
+| `--n-samples`  | `100`                          | Max test samples for explainers              |
+| `--top-k`      | `5`                            | Number of high-risk nodes to explain         |
+| `--stride`     | `6`                            | Stride for loading test data                 |
+| `--skip-shap`  | `false`                        | Skip SHAP (runs GNNExplainer + Captum only)  |
+| `--hidden-dim` | `128`                          | Model hidden dimension (must match training) |
+
+---
+
+## 🖥️ Phase 6: Interactive Glass-Box Dashboard
+
+A production-ready Streamlit web application that serves as a risk monitoring and model explainability interface.
+
+### Running the Dashboard
+
+```bash
+streamlit run app.py
+```
+
+### What it does:
+
+1. **Sidebar**: Dropdown selector populated from `summary.json` to inspect each of the Top-5 high-risk intersections, with live-updating statistics (mean risk, max risk, geographic coordinates)
+2. **Geospatial Risk Map (PyDeck)**: Interactive 3D map centered on Dallas showing the selected intersection (red dot), other high-risk nodes (orange dots), and GNNExplainer influence edges (arc layer with weight-proportional styling)
+3. **XAI Explanation Tabs**:
+   - **Feature Drivers (SHAP)**: Local SHAP bar chart answering _"What conditions caused this risk?"_
+   - **Temporal Evolution (Captum)**: 24-hour attribution chart answering _"When did the risk build up?"_
+   - **Global Model Insights**: City-wide SHAP importance answering _"How does the AI make decisions?"_
+
+### Technical Notes
+
+- **Coordinate conversion**: All node positions are stored in UTM Zone 14N (EPSG:32614); the dashboard converts to WGS84 (EPSG:4326) via `pyproj` for PyDeck rendering
+- **Performance**: All JSON loaders use `@st.cache_data`; the node position lookup uses `@st.cache_resource` (loads once per session)
+- **Error handling**: Missing artifact files trigger `st.warning()` instead of crashing the application
+
+### Commands
+
+```bash
+# Launch the interactive dashboard (opens in browser)
+streamlit run app.py
+
+# Launch on a specific port
+streamlit run app.py --server.port 8502
+
+# Launch in headless mode (no auto-open browser)
+streamlit run app.py --server.headless true
+
+# Install Phase 6 dependencies (if not already installed)
+pip install streamlit pydeck plotly pyproj
+```
+
+### Dependencies (added in Phase 6)
+
+| Package     | Purpose                           |
+| ----------- | --------------------------------- |
+| `streamlit` | Web application framework         |
+| `pydeck`    | Geospatial map visualisation      |
+| `plotly`    | Interactive XAI charts            |
+| `pyproj`    | UTM → WGS84 coordinate conversion |
+
+---
+
 ## 🔧 Technical Details
 
 ### NLP Distraction Detection (Phase 1)
@@ -376,6 +542,13 @@ The model encodes accident descriptions and computes cosine similarity against t
 - **Weighted MSE**: 10× weight on non-zero targets handles extreme sparsity (87% zero risk)
 - **Shape-annotated code**: Every tensor reshape has a `# → (shape)` comment for debugging
 
+### Explainability Pipeline (Phase 5)
+
+- **Subgraph SHAP**: Extracts 2-hop neighbourhood to make SHAP GPU-feasible on large graphs
+- **cuDNN disabled**: LSTM backward pass with Captum/SHAP requires cuDNN off for gradient stability
+- **Spatial-only GNNExplainer**: Uses GCN+MLP proxy (no LSTM) since GNNExplainer only explains graph structure
+- **Captum IntegratedGradients**: Attribution along time axis averaged across nodes/features per timestep
+
 ### Memory Management
 
 - Chunked CSV reading (100k rows/chunk)
@@ -414,8 +587,8 @@ Output columns in `dallas_crashes_annotated.csv`:
 - [x] **Phase 2**: Spatial Graph Construction & DR-ISI Target
 - [x] **Phase 3**: Spatio-Temporal Sequence Generation
 - [x] **Phase 4**: HybridSTGNN Model Architecture & Training
-- [ ] **Phase 5**: Full Training & Evaluation
-- [ ] **Phase 6**: Deployment & Visualization
+- [x] **Phase 5**: Explainability & Insights (SHAP, GNNExplainer, Captum)
+- [x] **Phase 6**: Interactive Glass-Box Dashboard (Streamlit + PyDeck + Plotly)
 
 ---
 
@@ -425,6 +598,7 @@ Output columns in `dallas_crashes_annotated.csv`:
 - **NLP Model**: [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 - **Road Network**: [OpenStreetMap](https://www.openstreetmap.org/) via [OSMnx](https://osmnx.readthedocs.io/)
 - **Graph ML**: [PyTorch Geometric](https://pyg.org/)
+- **XAI**: [SHAP](https://shap.readthedocs.io/), [Captum](https://captum.ai/), [GNNExplainer](https://arxiv.org/abs/1903.03894)
 
 ---
 
