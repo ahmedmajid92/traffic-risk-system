@@ -1,0 +1,16 @@
+{
+  "HybridSTGNN": {
+    "rmse": 0.0086,
+    "mae": 0.0005
+  },
+  "XGBoost": {
+    "rmse": 0.009674,
+    "mae": 0.00021,
+    "train_time_seconds": 32.3
+  },
+  "LSTM-Only": {
+    "rmse": 0.009528,
+    "mae": 0.001528,
+    "train_time_seconds": 939.2
+  }
+}

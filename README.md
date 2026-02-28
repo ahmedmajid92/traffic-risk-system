@@ -43,6 +43,7 @@ traffic-risk-system/
 │   ├── model_architecture.py       # Phase 4: HybridSTGNN model definition
 │   ├── train_model.py              # Phase 4: Training loop & evaluation
 │   ├── evaluate_model.py           # Phase 4: Standalone model evaluation
+│   ├── evaluate_baselines.py       # Phase 7: XGBoost & LSTM baseline benchmarks
 │   ├── generate_insights.py        # Phase 5: XAI pipeline orchestrator
 │   ├── xai/
 │   │   ├── adapters.py             # Phase 5: Model wrappers for SHAP/Captum/GNNExplainer
@@ -499,6 +500,60 @@ pip install streamlit pydeck plotly pyproj
 
 ---
 
+## 📊 Phase 7: Baseline Benchmarking & Evaluation
+
+To validate that the HybridSTGNN's spatio-temporal graph architecture provides measurable performance gains, we benchmark it against two standard baselines:
+
+### Theoretical Design
+
+| Model           | Temporal Sequence? | Graph Connectivity?  | What It Tests                                       |
+| --------------- | ------------------ | -------------------- | --------------------------------------------------- |
+| **XGBoost**     | ✗ (flat features)  | ✗ (per-node tabular) | Tabular ML upper bound                              |
+| **LSTM-Only**   | ✓ (24-h sequence)  | ✗ (per-node series)  | Value of temporal modelling without spatial context |
+| **HybridSTGNN** | ✓ (LSTM layer)     | ✓ (GCN layers)       | Full spatio-temporal architecture                   |
+
+By comparing RMSE/MAE across these three models:
+
+- **XGBoost → LSTM**: Quantifies the marginal value of temporal sequence modelling
+- **LSTM → ST-GNN**: Quantifies the marginal value of graph-based spatial reasoning
+
+### Results
+
+| Model              | RMSE       | MAE        | Train Time        |
+| ------------------ | ---------- | ---------- | ----------------- |
+| **HybridSTGNN** 🏆 | **0.0086** | 0.0005     | ~43 min (Phase 4) |
+| XGBoost            | 0.0097     | **0.0002** | 32s               |
+| LSTM-Only          | 0.0095     | 0.0015     | 939s              |
+
+**Key Findings:**
+
+- 🏆 **Best RMSE**: HybridSTGNN (0.0086) — **11.1% improvement** over the weakest baseline
+- 🏆 **Best MAE**: XGBoost (0.0002) — XGBoost excels at predicting near-zero values
+- The ST-GNN's GCN layers provide measurable spatial context that both baselines lack
+- The LSTM-Only baseline slightly outperforms XGBoost on RMSE, confirming temporal sequence modelling adds value
+
+### Commands
+
+```bash
+# Run full baseline evaluation (default: 500 nodes, stride=6)
+python src/evaluate_baselines.py
+
+# Quick test run (100 nodes, faster)
+python src/evaluate_baselines.py --n-nodes 100 --stride 12
+
+# Custom XGBoost/LSTM hyperparameters
+python src/evaluate_baselines.py --xgb-estimators 500 --lstm-epochs 10
+```
+
+### Outputs
+
+| File                                   | Description                                   |
+| -------------------------------------- | --------------------------------------------- |
+| `reports/metrics.json`                 | Machine-readable RMSE & MAE for all 3 models  |
+| `reports/figures/model_comparison.png` | Grouped bar chart comparing model performance |
+
+---
+
 ## 🔧 Technical Details
 
 ### NLP Distraction Detection (Phase 1)
@@ -589,6 +644,7 @@ Output columns in `dallas_crashes_annotated.csv`:
 - [x] **Phase 4**: HybridSTGNN Model Architecture & Training
 - [x] **Phase 5**: Explainability & Insights (SHAP, GNNExplainer, Captum)
 - [x] **Phase 6**: Interactive Glass-Box Dashboard (Streamlit + PyDeck + Plotly)
+- [x] **Phase 7**: Baseline Benchmarking & Evaluation (XGBoost + LSTM-Only vs ST-GNN)
 
 ---
 

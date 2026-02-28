@@ -470,6 +470,71 @@ def build_phase6() -> str:
 
 
 # =====================================================================
+# Phase 7
+# =====================================================================
+
+def build_phase7() -> tuple[str, plt.Figure | None]:
+    md = "## Phase 7: Baseline Benchmarking & Evaluation\n\n"
+    md += "**File:** `src/evaluate_baselines.py`\n\n"
+    md += "**Goal:** Prove that the ST-GNN architecture outperforms standard baselines.\n\n"
+
+    md += "### Theoretical Design\n\n"
+    md += "| Model | Temporal? | Graph? | What It Tests |\n"
+    md += "|-------|-----------|--------|---------------|\n"
+    md += "| XGBoost | \u2717 (flat) | \u2717 (per-node) | Tabular ML upper bound |\n"
+    md += "| LSTM-Only | \u2713 (24-h seq) | \u2717 (no graph) | Value of temporal modelling |\n"
+    md += "| HybridSTGNN | \u2713 (LSTM) | \u2713 (GCN) | Full spatio-temporal |\n"
+
+    md += "\n### Data Flattening\n\n"
+    md += "```mermaid\ngraph LR\n"
+    md += "    A(\"Original: B, 24, N, 5\") --> B(\"XGBoost: samples\u00d7N, 120\")\n"
+    md += "    A --> C(\"LSTM: samples\u00d7N, 24, 5\")\n"
+    md += "    A --> D(\"ST-GNN: B, 24, N, 5 + edges\")\n"
+    md += "```\n\n"
+
+    # Load results if available
+    metrics_path = Path("reports/metrics.json")
+    fig = None
+
+    if metrics_path.exists():
+        with open(metrics_path) as f:
+            results = json.load(f)
+
+        md += "### Results\n\n"
+        md += "| Model | RMSE | MAE |\n"
+        md += "|-------|------|-----|\n"
+        for name, m in results.items():
+            md += f"| {name} | {m['rmse']:.6f} | {m['mae']:.6f} |\n"
+
+        best = min(results, key=lambda k: results[k]["rmse"])
+        md += f"\n> \U0001f3c6 **Winner:** {best} (lowest RMSE)\n"
+    else:
+        md += "> \u26a0\ufe0f Results not yet generated. Run `python src/evaluate_baselines.py` first.\n"
+
+    # Load comparison chart if available
+    chart_path = Path("reports/figures/model_comparison.png")
+    if chart_path.exists():
+        try:
+            img = plt.imread(str(chart_path))
+            fig_obj, ax = plt.subplots(figsize=(14, 5))
+            ax.imshow(img)
+            ax.axis("off")
+            fig = fig_obj
+        except Exception:
+            pass
+
+    md += "\n### Commands\n\n"
+    md += "```bash\n"
+    md += "# Run the full benchmark\n"
+    md += "python src/evaluate_baselines.py\n\n"
+    md += "# Quick test (100 nodes)\n"
+    md += "python src/evaluate_baselines.py --n-nodes 100 --stride 12\n"
+    md += "```\n"
+
+    return md, fig
+
+
+# =====================================================================
 # Gradio App
 # =====================================================================
 
@@ -531,6 +596,13 @@ def create_app() -> gr.Blocks:
             with gr.Tab("🖥️ Phase 6 — Dashboard", elem_classes=["phase-tab"]):
                 gr.Markdown(build_phase6())
 
+            # ── Phase 7 ──
+            phase7_md, phase7_fig = build_phase7()
+            with gr.Tab("📊 Phase 7 — Baselines", elem_classes=["phase-tab"]):
+                gr.Markdown(phase7_md)
+                if phase7_fig is not None:
+                    gr.Plot(phase7_fig, label="Model Comparison")
+
             # ── Overview ──
             with gr.Tab("📋 Overview", elem_classes=["phase-tab"]):
                 md = "## Project Overview\n\n"
@@ -542,6 +614,7 @@ def create_app() -> gr.Blocks:
                 md += "| 4 | Model & Training | HybridSTGNN (157k params) | `model_architecture.py`, `train_model.py` |\n"
                 md += "| 5 | Explainability & Insights | SHAP, GNNExplainer, Captum | `generate_insights.py` |\n"
                 md += "| 6 | Interactive Dashboard | Streamlit + PyDeck + Plotly | `app.py` |\n"
+                md += "| 7 | Baseline Benchmarking | XGBoost + LSTM vs ST-GNN | `evaluate_baselines.py` |\n"
                 md += "\n### Data Flow\n\n"
                 md += "```\n"
                 md += "US_Accidents_March23.csv (3 GB)\n"
@@ -563,6 +636,9 @@ def create_app() -> gr.Blocks:
                 md += "    │  Phase 6: Streamlit + PyDeck + Plotly\n"
                 md += "    ▼\n"
                 md += "app.py → Interactive Glass-Box Dashboard (localhost:8501)\n"
+                md += "    │  Phase 7: XGBoost + LSTM baselines\n"
+                md += "    ▼\n"
+                md += "reports/metrics.json + model_comparison.png\n"
                 md += "```\n"
                 gr.Markdown(md)
 

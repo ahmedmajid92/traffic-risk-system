@@ -29,3 +29,6 @@ streamlit>=1.30.0
 pydeck>=0.8.0
 plotly>=5.18.0
 pyproj>=3.6.0
+
+# Baselines (Phase 7)
+xgboost>=2.0.0
