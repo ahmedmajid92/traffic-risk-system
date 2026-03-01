@@ -286,11 +286,18 @@ def load_all_node_risks() -> list[dict] | None:
     Load every node's static DR-ISI score and WGS84 position from
     processed_graph_data.pt.
 
+    Only nodes that are **true multi-way intersections** are included.
+    A node is considered a true intersection when its graph degree >= 3
+    (data.x[:, 0], stored as raw integers by graph_builder.py).
+    Degree-1 nodes are dead ends; degree-2 nodes are through-road
+    waypoints that visually appear on straight road segments rather
+    than at an intersection — both are excluded.
+
     Returns
     -------
     list[dict] or None
         Each dict contains node_idx, dr_isi, lat, lon.
-        Only non-zero DR-ISI nodes are included (~3,184 of 24,697).
+        Only non-zero DR-ISI nodes at true intersections are included.
         Sorted by dr_isi descending so slice [:N] gives the top-N.
         Returns None if the data file is not found or cannot be read.
     """
@@ -305,15 +312,23 @@ def load_all_node_risks() -> list[dict] | None:
             return None
         if not hasattr(data, "y") or data.y is None:
             return None
+        if not hasattr(data, "x") or data.x is None:
+            return None
 
         pos_np = data.pos.numpy()   # (N, 2) — UTM easting/northing
         y_np   = data.y.numpy()     # (N,)   — DR-ISI scores
+        x_np   = data.x.numpy()     # (N, 5) — node features
+
+        # Feature column 0 is degree (raw integer, see graph_builder.py)
+        degree_col = x_np[:, 0]
 
         nodes = []
         for idx in range(pos_np.shape[0]):
             dr_isi = float(y_np[idx])
-            if dr_isi <= 0.0:       # skip zero-risk nodes
-                continue
+            if dr_isi <= 0.0:
+                continue                        # skip zero-risk nodes
+            if degree_col[idx] < 3:
+                continue                        # skip dead ends and straight-road waypoints
             easting, northing = pos_np[idx]
             lat, lon = utm_to_latlon(easting, northing)
             nodes.append({

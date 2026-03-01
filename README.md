@@ -460,17 +460,28 @@ streamlit run app.py
 
 ### What it does:
 
-1. **Sidebar**: Dropdown selector populated from `summary.json` to inspect each of the Top-5 high-risk intersections, with live-updating statistics (mean risk, max risk, geographic coordinates)
-2. **Geospatial Risk Map (PyDeck)**: Interactive 3D map centered on Dallas showing the selected intersection (red dot), other high-risk nodes (orange dots), and GNNExplainer influence edges (arc layer with weight-proportional styling)
+1. **Sidebar**: Dropdown selector populated from `summary.json` to inspect each of the top high-risk intersections, with live-updating statistics (mean risk, max risk, geographic coordinates), and a **"High-risk intersections on map" slider** (range 5–500) to control how many additional DR-ISI-ranked nodes appear on the map
+2. **Geospatial Risk Map (PyDeck)**: Interactive 3D map centered on Dallas showing the selected intersection (🔴 red dot), other XAI-highlighted nodes (🟠 orange dots), **additional high-risk intersections** (🟡 yellow dots, count controlled by slider), and GNNExplainer influence edges (arc layer with weight-proportional styling). Base map uses **CartoDB Dark Matter** (OpenStreetMap data, no API key required)
 3. **XAI Explanation Tabs**:
    - **Feature Drivers (SHAP)**: Local SHAP bar chart answering _"What conditions caused this risk?"_
    - **Temporal Evolution (Captum)**: 24-hour attribution chart answering _"When did the risk build up?"_
    - **Global Model Insights**: City-wide SHAP importance answering _"How does the AI make decisions?"_
 
+### Map Visual Hierarchy
+
+| Marker | Colour | Size | Meaning |
+|--------|--------|------|---------|
+| 🔴 Red dot (large) | `[220, 30, 30]` | radius 150 | Currently selected intersection |
+| 🟠 Orange dot (medium) | `[255, 140, 0]` | radius 80 | Other XAI top-K nodes from `summary.json` |
+| 🟡 Yellow dot (small) | `[255, 220, 0]` | radius 40 | Additional high-risk nodes ranked by DR-ISI (count set by sidebar slider) |
+| Arc lines | Weight-mapped orange | width 3 | GNNExplainer influence edges |
+
 ### Technical Notes
 
+- **Base map**: CartoDB Dark Matter (`basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json`) — free, no API token, powered by OpenStreetMap data; compatible with PyDeck ≥ 0.8
 - **Coordinate conversion**: All node positions are stored in UTM Zone 14N (EPSG:32614); the dashboard converts to WGS84 (EPSG:4326) via `pyproj` for PyDeck rendering
-- **Performance**: All JSON loaders use `@st.cache_data`; the node position lookup uses `@st.cache_resource` (loads once per session)
+- **Extended node loader**: `load_all_node_risks()` reads `processed_graph_data.pt` once per session, extracts all ~3,184 non-zero DR-ISI nodes sorted by score, and caches the result with `@st.cache_resource`
+- **Performance**: All JSON loaders use `@st.cache_data`; node position and risk lookups use `@st.cache_resource` (loads once per session)
 - **Error handling**: Missing artifact files trigger `st.warning()` instead of crashing the application
 
 ### Commands
